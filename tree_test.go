@@ -950,3 +950,20 @@ func TestWithRustCompatibility(t *testing.T) {
 		t.Fatalf("rust and golang impl are not compatible rust=%x, go=%x", testAccountRootHashRust, hashBytes)
 	}
 }
+
+func FuzzStatelessVsStateful(f *testing.F) {
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, input []byte) {
+		rootF := New()
+		rootL := NewStateless()
+
+		for i := 0; i < len(input)/64; i++ {
+			rootF.Insert(input[i*64:i*64+32], input[i*64+32:(i+1)*64], nil)
+			rootL.Insert(input[i*64:i*64+32], input[i*64+32:(i+1)*64], nil)
+		}
+
+		if !Equal(rootL.ComputeCommitment(), rootF.ComputeCommitment()) {
+			t.Fatalf("root commitment for state-less != -ful %x != %x", rootF.ComputeCommitment().Bytes(), rootL.ComputeCommitment().Bytes())
+		}
+	})
+}
