@@ -29,6 +29,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
 )
 
 // StatelessNode represents a node for execution in a stateless context,
@@ -78,9 +80,7 @@ func NewStateless() *StatelessNode {
 }
 
 func NewStatelessWithCommitment(point *Point) *StatelessNode {
-	var (
-		xfr Fr
-	)
+	var xfr Fr
 	toFr(&xfr, point)
 	return &StatelessNode{
 		children:   make(map[byte]VerkleNode),
@@ -318,7 +318,7 @@ func (n *StatelessNode) newLeafChildFromMultipleValues(stem []byte, values [][]b
 
 	newchild := NewLeafNode(stem, values)
 	newchild.setDepth(n.depth + 1)
-	newchild.Commit()
+	// newchild.Commit()
 	return newchild
 }
 
@@ -417,7 +417,6 @@ func (n *StatelessNode) Get(k []byte, getter NodeResolverFn) ([]byte, error) {
 	child := n.children[nChild]
 	if child == nil {
 		if n.unresolved[nChild] == nil {
-
 			return nil, nil
 		}
 
@@ -444,6 +443,9 @@ func (n *StatelessNode) Commit() *Point {
 	if len(n.values) != 0 {
 		// skip this, stateless leaf nodes are currently broken
 	} else {
+		if len(n.cow) > 16 {
+			return n.commitRoot()
+		}
 		var poly [NodeWidth]Fr
 		empty := 256
 		if len(n.cow) != 0 {
@@ -455,9 +457,76 @@ func (n *StatelessNode) Commit() *Point {
 				poly[idx].Sub(&poly[idx], &pre)
 			}
 			n.cow = nil
-			n.commitment.Add(n.commitment, GetConfig().CommitToPoly(poly[:], empty))
+
+			comm := GetConfig().CommitToPoly(poly[:], empty)
+			n.commitment.Add(n.commitment, comm)
 			return n.commitment
 		}
+	}
+
+	return n.commitment
+}
+
+func (n *StatelessNode) commitRoot() *Point {
+	if len(n.cow) != 0 {
+		polyp := frPool.Get().(*[]Fr)
+		poly := *polyp
+		defer func() {
+			for i := 0; i < NodeWidth; i++ {
+				poly[i] = Fr{}
+			}
+			frPool.Put(polyp)
+		}()
+		emptyChildren := 256
+
+		var i int
+		b := make([]byte, len(n.cow))
+		points := make([]*Point, 2*len(n.cow))
+		for idx := range n.cow {
+			emptyChildren--
+			b[i] = idx
+			i++
+		}
+
+		var wg sync.WaitGroup
+		f := func(start, end int) {
+			defer wg.Done()
+			// now := time.Now()
+			for i := start; i < end; i++ {
+				points[2*i] = n.cow[b[i]]
+				points[2*i+1] = n.children[b[i]].Commit()
+			}
+			// fmt.Printf("goroutinecommit %v\n", time.Since(now))
+		}
+		numBatches := runtime.NumCPU() / 2
+		wg.Add(numBatches)
+		for i := 0; i < numBatches; i++ {
+			if i < numBatches-1 {
+				go f(i*(len(b)/numBatches), (i+1)*(len(b)/numBatches))
+			} else {
+				go f(i*(len(b)/numBatches), len(b))
+			}
+		}
+		wg.Wait()
+
+		frs := make([]*Fr, len(points))
+		for i := range frs {
+			if i%2 == 0 {
+				frs[i] = &Fr{}
+			} else {
+				frs[i] = &poly[b[i/2]]
+			}
+		}
+		toFrMultiple(frs, points)
+		for i := 0; i < len(points)/2; i++ {
+			poly[b[i]].Sub(frs[2*i+1], frs[2*i])
+		}
+
+		n.cow = nil
+
+		comm := cfg.CommitToPoly(poly, emptyChildren)
+		n.commitment.Add(n.commitment, comm)
+		return n.commitment
 	}
 
 	return n.commitment
@@ -486,9 +555,7 @@ func (n *StatelessNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][
 	)
 
 	if len(n.values) == 0 {
-		var (
-			groups = groupKeys(keys, n.depth)
-		)
+		groups := groupKeys(keys, n.depth)
 
 		for _, group := range groups {
 			childIdx := offset2key(group[0], n.depth)
