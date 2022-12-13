@@ -29,6 +29,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
 
 	"github.com/crate-crypto/go-ipa/banderwagon"
 )
@@ -41,7 +43,7 @@ type (
 // Committer represents an object that is able to create the
 // commitment to a polynomial.
 type Committer interface {
-	CommitToPoly([]Fr, int) *Point
+	CommitToPoly([]Fr, int) Point
 }
 
 type keylist [][]byte
@@ -218,23 +220,6 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 		c1:     Generator(),
 		c2:     Generator(),
 	}
-
-	// Initialize the commitment with the extension tree
-	// marker and the stem.
-	cfg := GetConfig()
-	count := 0
-	var poly, c1poly, c2poly [256]Fr
-	poly[0].SetUint64(1)
-	StemFromBytes(&poly[1], leaf.stem)
-
-	count = fillSuffixTreePoly(c1poly[:], values[:128])
-	leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
-	toFr(&poly[2], leaf.c1)
-	count = fillSuffixTreePoly(c2poly[:], values[128:])
-	leaf.c2 = cfg.CommitToPoly(c2poly[:], 256-count)
-	toFr(&poly[3], leaf.c2)
-
-	leaf.commitment = cfg.CommitToPoly(poly[:], 252)
 
 	return leaf
 }
@@ -488,6 +473,38 @@ func (n *InternalNode) Delete(key []byte, resolver NodeResolverFn) error {
 // with HashedNode. It also sends the current node on the flush channel.
 func (n *InternalNode) Flush(flush NodeFlushFn) {
 	n.Commit()
+
+	if n.depth <= 0 {
+		batches := runtime.NumCPU()
+		batchSize := len(n.children) / batches
+		var wg sync.WaitGroup
+		wg.Add(batches)
+		for k := 0; k < batches; k++ {
+			start := k * batchSize
+			end := (k + 1) * batchSize
+			if k == batches-1 {
+				end = len(n.children)
+			}
+			go func() {
+				defer wg.Done()
+				for i, child := range n.children[start:end] {
+					i := start + i
+					if c, ok := child.(*InternalNode); ok {
+						c.Commit()
+						c.Flush(flush)
+						n.children[i] = c.toHashedNode()
+					} else if c, ok := child.(*LeafNode); ok {
+						c.Commit()
+						flush(n.children[i])
+						n.children[i] = c.ToHashedNode()
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		flush(n)
+		return
+	}
 	for i, child := range n.children {
 		if c, ok := child.(*InternalNode); ok {
 			c.Commit()
@@ -573,24 +590,105 @@ func (n *InternalNode) Commitment() *Point {
 }
 
 func (n *InternalNode) Commit() *Point {
-	poly := make([]Fr, NodeWidth)
-	emptyChildren := 256
-
+	if n.depth <= 1 {
+		return n.commitRoot()
+	}
 	if len(n.cow) != 0 {
+		polyp := frPool.Get().(*[]Fr)
+		poly := *polyp
+		defer func() {
+			for i := 0; i < NodeWidth; i++ {
+				poly[i] = Fr{}
+			}
+			frPool.Put(polyp)
+		}()
+		emptyChildren := 256
+
+		var i int
+		b := make([]byte, len(n.cow))
+		points := make([]*Point, 2*len(n.cow))
 		for idx, comm := range n.cow {
 			emptyChildren--
-			var pre Fr
-			// TODO use kev's multimaptofield
-			toFr(&pre, comm)
-			// child in cow, so its child has also been
-			// modified, so call `Commit()` instead of
-			// `Commitment()`
-			toFr(&poly[idx], n.children[idx].Commit())
-			poly[idx].Sub(&poly[idx], &pre)
+			points[2*i] = comm
+			points[2*i+1] = n.children[idx].Commit()
+			b[i] = idx
+			i++
 		}
+		frs := make([]*Fr, len(points))
+		for i := range frs {
+			frs[i] = &Fr{}
+		}
+		toFrMultiple(frs, points)
+		for i := 0; i < len(points)/2; i++ {
+			poly[b[i]].Sub(frs[2*i+1], frs[2*i])
+		}
+
 		n.cow = nil
 
-		n.commitment.Add(n.commitment, GetConfig().CommitToPoly(poly, emptyChildren))
+		n.commitment.Add(n.commitment, cfg.CommitToPoly(poly, emptyChildren))
+		return n.commitment
+	}
+
+	return n.commitment
+}
+
+func (n *InternalNode) commitRoot() *Point {
+	if len(n.cow) != 0 {
+		polyp := frPool.Get().(*[]Fr)
+		poly := *polyp
+		defer func() {
+			for i := 0; i < NodeWidth; i++ {
+				poly[i] = Fr{}
+			}
+			frPool.Put(polyp)
+		}()
+		emptyChildren := 256
+
+		var i int
+		b := make([]byte, len(n.cow))
+		points := make([]*Point, 2*len(n.cow))
+		for idx := range n.cow {
+			emptyChildren--
+			b[i] = idx
+			i++
+		}
+
+		var wg sync.WaitGroup
+		f := func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				points[2*i] = n.cow[b[i]]
+				points[2*i+1] = n.children[b[i]].Commit()
+			}
+		}
+		numBatches := runtime.NumCPU()
+		wg.Add(numBatches)
+		for i := 0; i < numBatches; i++ {
+			if i < numBatches-1 {
+				go f(i*(len(b)/numBatches), (i+1)*(len(b)/numBatches))
+			} else {
+				go f(i*(len(b)/numBatches), len(b))
+			}
+		}
+
+		frs := make([]*Fr, len(points))
+		for i := range frs {
+			if i%2 == 0 {
+				frs[i] = &Fr{}
+			} else {
+				frs[i] = &poly[b[i/2]]
+			}
+		}
+		wg.Wait()
+
+		toFrMultiple(frs, points)
+		for i := 0; i < len(points)/2; i++ {
+			poly[b[i]].Sub(frs[2*i+1], frs[2*i])
+		}
+
+		n.cow = nil
+
+		n.commitment.Add(n.commitment, cfg.CommitToPoly(poly, emptyChildren))
 		return n.commitment
 	}
 
@@ -793,7 +891,7 @@ func MergeTrees(subroots []*InternalNode) VerkleNode {
 
 func (n *LeafNode) ToHashedNode() *HashedNode {
 	if n.commitment == nil {
-		panic("nil commitment")
+		n.Commit()
 	}
 	comm := n.commitment.Bytes()
 	return &HashedNode{commitment: comm[:]}
@@ -873,6 +971,10 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 }
 
 func (n *LeafNode) updateLeaf(index byte, value []byte) {
+	if n.commitment == nil {
+		n.Commit()
+	}
+
 	c, oldc := n.getOldCn(index)
 
 	n.updateCn(index, value, c)
@@ -883,6 +985,10 @@ func (n *LeafNode) updateLeaf(index byte, value []byte) {
 }
 
 func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
+	if n.commitment == nil {
+		n.Commit()
+	}
+
 	var c1, c2 *Point
 	var old1, old2 *Fr
 	for i, v := range values {
@@ -952,13 +1058,54 @@ func (n *LeafNode) Hash() *Fr {
 
 func (n *LeafNode) Commitment() *Point {
 	if n.commitment == nil {
-		panic("nil commitment")
+		n.Commit()
 	}
 	return n.commitment
 }
 
-func (n *LeafNode) Commit() *Point {
-	return n.commitment
+var frPool = sync.Pool{
+	New: func() any {
+		ret := make([]Fr, NodeWidth)
+		return &ret
+	},
+}
+
+func (leaf *LeafNode) Commit() *Point {
+	if leaf.commitment == nil {
+		// Initialize the commitment with the extension tree
+		// marker and the stem.
+		count := 0
+		polyp, c1polyp := frPool.Get().(*[]Fr), frPool.Get().(*[]Fr)
+		poly, c1poly := *polyp, *c1polyp
+		defer func() {
+			for i := 0; i < 256; i++ {
+				poly[i] = Fr{}
+				c1poly[i] = Fr{}
+			}
+			frPool.Put(polyp)
+			frPool.Put(c1polyp)
+		}()
+		poly[0].SetUint64(1)
+		StemFromBytes(&poly[1], leaf.stem)
+
+		lim := len(leaf.values)
+		if lim > 128 {
+			lim = 128
+		}
+		count = fillSuffixTreePoly(c1poly[:], leaf.values[:lim])
+		leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
+
+		for i := 0; i < 256; i++ {
+			c1poly[i] = Fr{}
+		}
+		count = fillSuffixTreePoly(c1poly[:], leaf.values[lim:])
+		leaf.c2 = cfg.CommitToPoly(c1poly[:], 256-count)
+
+		toFrMultiple([]*Fr{&poly[2], &poly[3]}, []*Point{leaf.c1, leaf.c2})
+		leaf.commitment = cfg.CommitToPoly(poly[:], 252)
+	}
+
+	return leaf.commitment
 }
 
 // fillSuffixTreePoly takes one of the two suffix tree and
@@ -1019,8 +1166,7 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 	// Initialize the top-level polynomial with 1 + stem + C1 + C2
 	poly[0].SetUint64(1)
 	StemFromBytes(&poly[1], n.stem)
-	toFr(&poly[2], n.c1)
-	toFr(&poly[3], n.c2)
+	toFrMultiple([]*Fr{&poly[2], &poly[3]}, []*Point{n.c1, n.c2})
 
 	// First pass: add top-level elements first
 	var hasC1, hasC2 bool
@@ -1157,9 +1303,12 @@ func (n *LeafNode) Serialize() ([]byte, error) {
 			}
 		}
 	}
-	c1bytes := n.c1.Bytes()
-	c2bytes := n.c2.Bytes()
-	return append(append(append(append(append([]byte{leafRLPType}, n.stem[:31]...), bitlist[:]...), c1bytes[:]...), c2bytes[:]...), children...), nil
+	result := make([]byte, 1+31+32, 1+31+32+4*32)
+	result[0] = leafRLPType
+	copy(result[1:], n.stem[:31])
+	copy(result[1+31:], bitlist[:])
+	result = append(result, children...)
+	return result, nil
 }
 
 func (n *LeafNode) Copy() VerkleNode {
