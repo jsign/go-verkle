@@ -318,7 +318,6 @@ func (n *StatelessNode) newLeafChildFromMultipleValues(stem []byte, values [][]b
 
 	newchild := NewLeafNode(stem, values)
 	newchild.setDepth(n.depth + 1)
-	// newchild.Commit()
 	return newchild
 }
 
@@ -491,12 +490,10 @@ func (n *StatelessNode) commitRoot() *Point {
 		var wg sync.WaitGroup
 		f := func(start, end int) {
 			defer wg.Done()
-			// now := time.Now()
 			for i := start; i < end; i++ {
 				points[2*i] = n.cow[b[i]]
 				points[2*i+1] = n.children[b[i]].Commit()
 			}
-			// fmt.Printf("goroutinecommit %v\n", time.Since(now))
 		}
 		numBatches := runtime.NumCPU() / 2
 		wg.Add(numBatches)
