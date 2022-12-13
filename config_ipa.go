@@ -38,8 +38,8 @@ type IPAConfig struct {
 type Config = IPAConfig
 
 func (ipac *IPAConfig) CommitToPoly(poly []Fr, _ int) *Point {
-	ret := ipac.conf.Commit(poly)
-	return &ret
+	c := ipac.conf.Commit(poly)
+	return &c
 }
 
 var cfg *Config
@@ -69,8 +69,10 @@ func GetConfig() *Config {
 	return cfg
 }
 
-var FrZero Fr
-var FrOne Fr
+var (
+	FrZero Fr
+	FrOne  Fr
+)
 
 func init() {
 	FrZero.SetZero()
