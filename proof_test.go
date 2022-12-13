@@ -214,6 +214,7 @@ func TestProofOfAbsenceStemVerify(t *testing.T) {
 }
 
 func BenchmarkProofCalculation(b *testing.B) {
+	_ = GetConfig()
 	keys := make([][]byte, 100000)
 	root := New()
 	for i := 0; i < 100000; i++ {
