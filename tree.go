@@ -1303,10 +1303,21 @@ func (n *LeafNode) Serialize() ([]byte, error) {
 			}
 		}
 	}
-	result := make([]byte, 1+31+32, 1+31+32+4*32)
+	c1bytes := n.c1.Bytes()
+	c2bytes := n.c2.Bytes()
+
+	// The length of the result is at a minimum the sum of:
+	// 1 = leafRLPType
+	// 31 = length of n.stem
+	// 32 = length of bitlist
+	// 2*32 = c1bytes and c2bytes
+	// And we add 4*32 bytes of extra capacity for an ~expected 4 children.
+	result := make([]byte, 1+31+32+2*32, 1+31+32+2*32+4*32)
 	result[0] = leafRLPType
 	copy(result[1:], n.stem[:31])
 	copy(result[1+31:], bitlist[:])
+	copy(result[1+31+32:], c1bytes[:])
+	copy(result[1+31+32+32:], c2bytes[:])
 	result = append(result, children...)
 	return result, nil
 }
