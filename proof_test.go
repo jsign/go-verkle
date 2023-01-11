@@ -223,6 +223,7 @@ func BenchmarkProofCalculation(b *testing.B) {
 		keys[i] = key
 		root.Insert(key, zeroKeyTest, nil)
 	}
+	root.Commit()
 
 	b.ResetTimer()
 	b.ReportAllocs()
