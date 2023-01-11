@@ -30,8 +30,14 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"os"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	_ = GetConfig()
+	os.Exit(m.Run())
+}
 
 func TestProofVerifyTwoLeaves(t *testing.T) {
 	root := New()
@@ -176,6 +182,7 @@ func TestProofOfAbsenceLeafVerify(t *testing.T) {
 		t.Fatal("could not verify verkle proof")
 	}
 }
+
 func TestProofOfAbsenceLeafVerifyOtherSuffix(t *testing.T) {
 	root := New()
 	root.Insert(zeroKeyTest, zeroKeyTest, nil)
@@ -370,7 +377,6 @@ func TestProofDeserialize(t *testing.T) {
 }
 
 func TestProofDeserializeErrors(t *testing.T) {
-
 	deserialized, err := DeserializeProof([]byte{0}, nil)
 	if err == nil {
 		t.Fatal("deserializing invalid proof didn't cause an error")
