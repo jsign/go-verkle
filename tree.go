@@ -189,6 +189,7 @@ type (
 
 		commitment *Point
 		c1, c2     *Point
+		cow        map[byte][]byte
 
 		depth byte
 	}
@@ -219,6 +220,13 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 		stem:   stem[:31], // enforce a 31-byte length
 		c1:     Generator(),
 		c2:     Generator(),
+		cow:    map[byte][]byte{},
+	}
+
+	for i, v := range values {
+		if v != nil {
+			leaf.cow[byte(i)] = nil
+		}
 	}
 
 	return leaf
@@ -891,7 +899,7 @@ func MergeTrees(subroots []*InternalNode) VerkleNode {
 
 func (n *LeafNode) ToHashedNode() *HashedNode {
 	if n.commitment == nil {
-		n.Commit()
+		panic("nil commitment")
 	}
 	comm := n.commitment.Bytes()
 	return &HashedNode{commitment: comm[:]}
@@ -928,7 +936,7 @@ func (n *LeafNode) getOldCn(index byte) (*Point, *Fr) {
 	return c, &oldc
 }
 
-func (n *LeafNode) updateC(index byte, c *Point, oldc *Fr) {
+func (n *LeafNode) updateC(stem []byte, index byte, c *Point, oldc *Fr) {
 	var (
 		newc Fr
 		diff Point
@@ -938,11 +946,19 @@ func (n *LeafNode) updateC(index byte, c *Point, oldc *Fr) {
 	toFr(&newc, c)
 	newc.Sub(&newc, oldc)
 	poly[2+(index/128)] = newc
+
+	if n.commitment == nil {
+		poly[0].SetUint64(1)
+		StemFromBytes(&poly[1], stem)
+		comm := cfg.conf.Commit(poly[:])
+		n.commitment = &comm
+		return
+	}
 	diff = cfg.conf.Commit(poly[:])
 	n.commitment.Add(n.commitment, &diff)
 }
 
-func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
+func (n *LeafNode) updateCn(index byte, oldValue []byte, c *Point) {
 	var (
 		old, newH [2]Fr
 		diff      Point
@@ -955,8 +971,8 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 	// do not include it. The result should be the same,
 	// but the computation time should be faster as one doesn't need to
 	// compute 1 - 1 mod N.
-	leafToComms(old[:], n.values[index])
-	leafToComms(newH[:], value)
+	leafToComms(old[:], oldValue)
+	leafToComms(newH[:], n.values[index])
 
 	newH[0].Sub(&newH[0], &old[0])
 	poly[2*(index%128)] = newH[0]
@@ -971,8 +987,29 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 }
 
 func (n *LeafNode) updateLeaf(index byte, value []byte) {
+	// If cow was never setup, then initialize the map.
+	if n.cow == nil {
+		n.cow = make(map[byte][]byte)
+	}
+
+	// If we are touching an value in an index for the first time,
+	// we save the original value for future use to update commitments.
+	if _, ok := n.cow[index]; !ok {
+		if n.values[index] == nil {
+			n.cow[index] = nil
+		} else {
+			n.cow[index] = make([]byte, 32)
+			copy(n.cow[index], n.values[index])
+		}
+	}
+
+	n.values[index] = value
+}
+
+/*
+func (n *LeafNode) updateLeaf(index byte, value []byte) {
 	if n.commitment == nil {
-		n.Commit()
+		panic("nil commitment")
 	}
 
 	c, oldc := n.getOldCn(index)
@@ -983,10 +1020,20 @@ func (n *LeafNode) updateLeaf(index byte, value []byte) {
 
 	n.values[index] = value
 }
+*/
 
 func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
+	for i := range values {
+		if values[i] != nil {
+			n.updateLeaf(byte(i), values[i])
+		}
+	}
+}
+
+/*
+func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
 	if n.commitment == nil {
-		n.Commit()
+		panic("nil commitment")
 	}
 
 	var c1, c2 *Point
@@ -1016,6 +1063,7 @@ func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
 		n.updateC(128, c2, old2)
 	}
 }
+*/
 
 func (n *LeafNode) InsertOrdered(key []byte, value []byte, _ NodeFlushFn) error {
 	// In the previous version, this value used to be flushed on insert.
@@ -1058,7 +1106,7 @@ func (n *LeafNode) Hash() *Fr {
 
 func (n *LeafNode) Commitment() *Point {
 	if n.commitment == nil {
-		n.Commit()
+		panic("nil commitment")
 	}
 	return n.commitment
 }
@@ -1071,38 +1119,68 @@ var frPool = sync.Pool{
 }
 
 func (leaf *LeafNode) Commit() *Point {
-	if leaf.commitment == nil {
-		// Initialize the commitment with the extension tree
-		// marker and the stem.
-		count := 0
-		polyp, c1polyp := frPool.Get().(*[]Fr), frPool.Get().(*[]Fr)
-		poly, c1poly := *polyp, *c1polyp
-		defer func() {
+	if len(leaf.cow) != 0 {
+		var c1, c2 *Point
+		var old1, old2 *Fr
+		for i, oldValue := range leaf.cow {
+			if !bytes.Equal(oldValue, leaf.values[i]) {
+				if i < 128 {
+					if c1 == nil {
+						c1, old1 = leaf.getOldCn(byte(i))
+					}
+					leaf.updateCn(byte(i), oldValue, c1)
+				} else {
+					if c2 == nil {
+						c2, old2 = leaf.getOldCn(byte(i))
+					}
+					leaf.updateCn(byte(i), oldValue, c2)
+				}
+			}
+		}
+
+		if c1 != nil {
+			leaf.updateC(leaf.stem, 0, c1, old1)
+		}
+		if c2 != nil {
+			leaf.updateC(leaf.stem, 128, c2, old2)
+		}
+
+		leaf.cow = nil
+		/*
+			// Initialize the commitment with the extension tree
+			// marker and the stem.
+			count := 0
+			polyp, c1polyp := frPool.Get().(*[]Fr), frPool.Get().(*[]Fr)
+			// TODO(jsign): remove "poly" and reuse again c1poly
+			poly, c1poly := *polyp, *c1polyp
+			defer func() {
+				for i := 0; i < 256; i++ {
+					poly[i] = Fr{}
+					c1poly[i] = Fr{}
+				}
+				frPool.Put(polyp)
+				frPool.Put(c1polyp)
+			}()
+			poly[0].SetUint64(1)
+			StemFromBytes(&poly[1], leaf.stem)
+
+			// TODO(jsign)
+			if len(leaf.values) != 256 {
+				panic("leaf doesn't have 256 values")
+			}
+			count = fillSuffixTreePoly(c1poly[:], leaf.values[:128])
+			leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
+
 			for i := 0; i < 256; i++ {
-				poly[i] = Fr{}
 				c1poly[i] = Fr{}
 			}
-			frPool.Put(polyp)
-			frPool.Put(c1polyp)
-		}()
-		poly[0].SetUint64(1)
-		StemFromBytes(&poly[1], leaf.stem)
+			count = fillSuffixTreePoly(c1poly[:], leaf.values[128:])
+			leaf.c2 = cfg.CommitToPoly(c1poly[:], 256-count)
 
-		lim := len(leaf.values)
-		if lim > 128 {
-			lim = 128
-		}
-		count = fillSuffixTreePoly(c1poly[:], leaf.values[:lim])
-		leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
-
-		for i := 0; i < 256; i++ {
-			c1poly[i] = Fr{}
-		}
-		count = fillSuffixTreePoly(c1poly[:], leaf.values[lim:])
-		leaf.c2 = cfg.CommitToPoly(c1poly[:], 256-count)
-
-		toFrMultiple([]*Fr{&poly[2], &poly[3]}, []*Point{leaf.c1, leaf.c2})
-		leaf.commitment = cfg.CommitToPoly(poly[:], 252)
+			toFrMultiple([]*Fr{&poly[2], &poly[3]}, []*Point{leaf.c1, leaf.c2})
+			leaf.commitment = cfg.CommitToPoly(poly[:], 252)
+			fmt.Printf("comm: %x\n", leaf.commitment.Bytes())
+		*/
 	}
 
 	return leaf.commitment
