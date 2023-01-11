@@ -954,7 +954,24 @@ var frPool = sync.Pool{
 }
 
 func (leaf *LeafNode) Commit() *Point {
-	if len(leaf.cow) != 0 {
+	if leaf.commitment == nil {
+		// Initialize the commitment with the extension tree
+		// marker and the stem.
+		cfg := GetConfig()
+		count := 0
+		var poly, c1poly, c2poly [256]Fr
+		poly[0].SetUint64(1)
+		StemFromBytes(&poly[1], leaf.stem)
+
+		count = fillSuffixTreePoly(c1poly[:], leaf.values[:128])
+		leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
+		toFr(&poly[2], leaf.c1)
+		count = fillSuffixTreePoly(c2poly[:], leaf.values[128:])
+		leaf.c2 = cfg.CommitToPoly(c2poly[:], 256-count)
+		toFr(&poly[3], leaf.c2)
+
+		leaf.commitment = cfg.CommitToPoly(poly[:], 252)
+	} else if len(leaf.cow) != 0 {
 		var c1, c2 *Point
 		var old1, old2 *Fr
 		for i, oldValue := range leaf.cow {
@@ -979,9 +996,8 @@ func (leaf *LeafNode) Commit() *Point {
 		if c2 != nil {
 			leaf.updateC(leaf.stem, 128, c2, old2)
 		}
-
-		leaf.cow = nil
 	}
+	leaf.cow = nil
 
 	return leaf.commitment
 }
