@@ -222,12 +222,6 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 		cow:    map[byte][]byte{},
 	}
 
-	for i, v := range values {
-		if v != nil {
-			leaf.cow[byte(i)] = nil
-		}
-	}
-
 	return leaf
 }
 
@@ -833,13 +827,6 @@ func (n *LeafNode) updateC(stem []byte, index byte, c *Point, oldc *Fr) {
 	newc.Sub(&newc, oldc)
 	poly[2+(index/128)] = newc
 
-	if n.commitment == nil {
-		poly[0].SetUint64(1)
-		StemFromBytes(&poly[1], stem)
-		comm := cfg.conf.Commit(poly[:])
-		n.commitment = &comm
-		return
-	}
 	diff = cfg.conf.Commit(poly[:])
 	n.commitment.Add(n.commitment, &diff)
 }
@@ -873,19 +860,21 @@ func (n *LeafNode) updateCn(index byte, oldValue []byte, c *Point) {
 }
 
 func (n *LeafNode) updateLeaf(index byte, value []byte) {
-	// If cow was never setup, then initialize the map.
-	if n.cow == nil {
-		n.cow = make(map[byte][]byte)
-	}
+	if n.commitment != nil {
+		// If cow was never setup, then initialize the map.
+		if n.cow == nil {
+			n.cow = make(map[byte][]byte)
+		}
 
-	// If we are touching an value in an index for the first time,
-	// we save the original value for future use to update commitments.
-	if _, ok := n.cow[index]; !ok {
-		if n.values[index] == nil {
-			n.cow[index] = nil
-		} else {
-			n.cow[index] = make([]byte, 32)
-			copy(n.cow[index], n.values[index])
+		// If we are touching an value in an index for the first time,
+		// we save the original value for future use to update commitments.
+		if _, ok := n.cow[index]; !ok {
+			if n.values[index] == nil {
+				n.cow[index] = nil
+			} else {
+				n.cow[index] = make([]byte, 32)
+				copy(n.cow[index], n.values[index])
+			}
 		}
 	}
 
