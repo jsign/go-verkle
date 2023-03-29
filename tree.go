@@ -178,7 +178,7 @@ type (
 
 	LeafNode struct {
 		stem   []byte
-		values [][]byte
+		values map[int][]byte
 
 		commitment *Point
 		c1, c2     *Point
@@ -205,10 +205,15 @@ func New() VerkleNode {
 
 // New creates a new leaf node
 func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
+	vals := make(map[int][]byte, len(values))
+	for i, v := range values {
+		vals[i] = v
+	}
+
 	leaf := &LeafNode{
 		// depth will be 0, but the commitment calculation
 		// does not need it, and so it won't be free.
-		values: values,
+		values: vals,
 		stem:   stem[:31], // enforce a 31-byte length
 		c1:     Generator(),
 		c2:     Generator(),
@@ -237,10 +242,14 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 // commitments. The created node's commitments are intended to be
 // initialized with `SetTrustedBytes` in a deserialization context.
 func NewLeafNodeWithNoComms(stem []byte, values [][]byte) *LeafNode {
+	vals := make(map[int][]byte, len(values))
+	for i, v := range values {
+		vals[i] = v
+	}
 	return &LeafNode{
 		// depth will be 0, but the commitment calculation
 		// does not need it, and so it won't be free.
-		values: values,
+		values: vals,
 		stem:   stem,
 	}
 }
@@ -366,7 +375,11 @@ func (n *InternalNode) GetStem(stem []byte, resolver NodeResolverFn) ([][]byte, 
 		return n.GetStem(stem, resolver)
 	case *LeafNode:
 		if equalPaths(child.stem, stem) {
-			return child.values, nil
+			values := make([][]byte, NodeWidth)
+			for i, v := range child.values {
+				values[i] = v
+			}
+			return values, nil
 		}
 		return nil, nil
 	case *InternalNode:
@@ -933,7 +946,7 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 	// do not include it. The result should be the same,
 	// but the computation time should be faster as one doesn't need to
 	// compute 1 - 1 mod N.
-	leafToComms(old[:], n.values[index])
+	leafToComms(old[:], n.values[int(index)])
 	leafToComms(newH[:], value)
 
 	newH[0].Sub(&newH[0], &old[0])
@@ -969,7 +982,7 @@ func (n *LeafNode) updateLeaf(index byte, value []byte) {
 	cxIndex := 2 + int(index)/(NodeWidth/2) // [1, stem, -> C1, C2 <-]
 	n.updateC(cxIndex, frs[0], frs[1])
 
-	n.values[index] = value
+	n.values[int(index)] = value
 }
 
 func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
@@ -1050,7 +1063,7 @@ func (n *LeafNode) Get(k []byte, _ NodeResolverFn) ([]byte, error) {
 		return nil, nil
 	}
 	// value can be nil, as expected by geth
-	return n.values[k[31]], nil
+	return n.values[int(k[31])], nil
 }
 
 func (n *LeafNode) Hash() *Fr {
@@ -1189,11 +1202,14 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 			suffPoly [256]Fr // suffix-level polynomial
 			count    int
 		)
-
+		valsslice := make([][]byte, 256)
+		for idx := range n.values {
+			valsslice[idx] = n.values[idx]
+		}
 		if suffix >= 128 {
-			count = fillSuffixTreePoly(suffPoly[:], n.values[128:])
+			count = fillSuffixTreePoly(suffPoly[:], valsslice[128:])
 		} else {
-			count = fillSuffixTreePoly(suffPoly[:], n.values[:128])
+			count = fillSuffixTreePoly(suffPoly[:], valsslice[:128])
 		}
 
 		// Proof of absence: case of a missing suffix tree.
@@ -1227,7 +1243,7 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 		// only happen when the leaf has never been written to
 		// since after deletion the value would be set to zero
 		// but still contain the leaf marker 2^128.
-		if n.values[suffix] == nil {
+		if n.values[int(suffix)] == nil {
 			pe.Cis = append(pe.Cis, scomm, scomm)
 			pe.Zis = append(pe.Zis, 2*suffix, 2*suffix+1)
 			pe.Yis = append(pe.Yis, &FrZero, &FrZero)
@@ -1241,7 +1257,7 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 
 		// suffix tree is present and contains the key
 		var leaves [2]Fr
-		leafToComms(leaves[:], n.values[suffix])
+		leafToComms(leaves[:], n.values[int(suffix)])
 		pe.Cis = append(pe.Cis, scomm, scomm)
 		pe.Zis = append(pe.Zis, 2*suffix, 2*suffix+1)
 		pe.Yis = append(pe.Yis, &leaves[0], &leaves[1])
@@ -1265,7 +1281,8 @@ func (n *LeafNode) Serialize() ([]byte, error) {
 func (n *LeafNode) Copy() VerkleNode {
 	l := &LeafNode{}
 	l.stem = make([]byte, len(n.stem))
-	l.values = make([][]byte, len(n.values))
+	l.values = make(map[int][]byte, len(n.values))
+
 	l.depth = n.depth
 	copy(l.stem, n.stem)
 	for i, v := range n.values {
@@ -1316,7 +1333,11 @@ func (n *LeafNode) setDepth(d byte) {
 }
 
 func (n *LeafNode) Values() [][]byte {
-	return n.values
+	valsslice := make([][]byte, 256)
+	for idx := range n.values {
+		valsslice[idx] = n.values[idx]
+	}
+	return valsslice
 }
 
 func setBit(bitlist []byte, index int) {
@@ -1488,7 +1509,7 @@ func (n *LeafNode) serializeWithCompressedCommitments(c1Bytes [32]byte, c2Bytes 
 
 type BatchNewLeafNodeData struct {
 	Stem   []byte
-	Values [][]byte
+	Values map[int][]byte
 }
 
 func BatchNewLeafNode(nodesValues []BatchNewLeafNodeData) []LeafNode {
@@ -1507,9 +1528,14 @@ func BatchNewLeafNode(nodesValues []BatchNewLeafNodeData) []LeafNode {
 
 		var c1poly, c2poly [256]Fr
 
-		fillSuffixTreePoly(c1poly[:], nv.Values[:128])
+		valsslice := make([][]byte, 256)
+		for idx := range nv.Values {
+			valsslice[idx] = nv.Values[idx]
+		}
+
+		fillSuffixTreePoly(c1poly[:], valsslice[:128])
 		ret[i].c1 = cfg.CommitToPoly(c1poly[:], 0)
-		fillSuffixTreePoly(c2poly[:], nv.Values[128:])
+		fillSuffixTreePoly(c2poly[:], valsslice[128:])
 		ret[i].c2 = cfg.CommitToPoly(c2poly[:], 0)
 
 		c1c2points[2*i], c1c2points[2*i+1] = ret[i].c1, ret[i].c2
