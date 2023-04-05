@@ -177,7 +177,7 @@ type (
 
 	LeafNode struct {
 		stem   []byte
-		values map[int][]byte
+		values map[byte][]byte
 
 		commitment *Point
 		c1, c2     *Point
@@ -204,9 +204,9 @@ func New() VerkleNode {
 
 // New creates a new leaf node
 func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
-	vals := make(map[int][]byte, len(values))
+	vals := make(map[byte][]byte, len(values))
 	for i, v := range values {
-		vals[i] = v
+		vals[byte(i)] = v
 	}
 
 	leaf := &LeafNode{
@@ -241,9 +241,9 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 // commitments. The created node's commitments are intended to be
 // initialized with `SetTrustedBytes` in a deserialization context.
 func NewLeafNodeWithNoComms(stem []byte, values [][]byte) *LeafNode {
-	vals := make(map[int][]byte, len(values))
+	vals := make(map[byte][]byte, len(values))
 	for i, v := range values {
-		vals[i] = v
+		vals[byte(i)] = v
 	}
 	return &LeafNode{
 		// depth will be 0, but the commitment calculation
@@ -945,7 +945,7 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 	// do not include it. The result should be the same,
 	// but the computation time should be faster as one doesn't need to
 	// compute 1 - 1 mod N.
-	leafToComms(old[:], n.values[int(index)])
+	leafToComms(old[:], n.values[index])
 	leafToComms(newH[:], value)
 
 	newH[0].Sub(&newH[0], &old[0])
@@ -981,7 +981,7 @@ func (n *LeafNode) updateLeaf(index byte, value []byte) {
 	cxIndex := 2 + int(index)/(NodeWidth/2) // [1, stem, -> C1, C2 <-]
 	n.updateC(cxIndex, frs[0], frs[1])
 
-	n.values[int(index)] = value
+	n.values[index] = value
 }
 
 func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
@@ -992,7 +992,7 @@ func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
 	// commitment. We copy the original point in oldC1 and oldC2, so we can batch their Fr transformation
 	// after this loop.
 	for i, v := range values {
-		if len(v) != 0 && !bytes.Equal(v, n.values[i]) {
+		if len(v) != 0 && !bytes.Equal(v, n.values[byte(i)]) {
 			if i < NodeWidth/2 {
 				// First time we touch C1? Save the original point for later.
 				if oldC1 == nil {
@@ -1010,7 +1010,7 @@ func (n *LeafNode) updateMultipleLeaves(values [][]byte) {
 				// We update C2 directly in `n`. We have our original copy in oldC2.
 				n.updateCn(byte(i), v, n.c2)
 			}
-			n.values[i] = v
+			n.values[byte(i)] = v
 		}
 	}
 
@@ -1062,7 +1062,7 @@ func (n *LeafNode) Get(k []byte, _ NodeResolverFn) ([]byte, error) {
 		return nil, nil
 	}
 	// value can be nil, as expected by geth
-	return n.values[int(k[31])], nil
+	return n.values[k[31]], nil
 }
 
 func (n *LeafNode) Hash() *Fr {
@@ -1242,7 +1242,7 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 		// only happen when the leaf has never been written to
 		// since after deletion the value would be set to zero
 		// but still contain the leaf marker 2^128.
-		if n.values[int(suffix)] == nil {
+		if n.values[suffix] == nil {
 			pe.Cis = append(pe.Cis, scomm, scomm)
 			pe.Zis = append(pe.Zis, 2*suffix, 2*suffix+1)
 			pe.Yis = append(pe.Yis, &FrZero, &FrZero)
@@ -1256,7 +1256,7 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 
 		// suffix tree is present and contains the key
 		var leaves [2]Fr
-		leafToComms(leaves[:], n.values[int(suffix)])
+		leafToComms(leaves[:], n.values[suffix])
 		pe.Cis = append(pe.Cis, scomm, scomm)
 		pe.Zis = append(pe.Zis, 2*suffix, 2*suffix+1)
 		pe.Yis = append(pe.Yis, &leaves[0], &leaves[1])
@@ -1280,7 +1280,7 @@ func (n *LeafNode) Serialize() ([]byte, error) {
 func (n *LeafNode) Copy() VerkleNode {
 	l := &LeafNode{}
 	l.stem = make([]byte, len(n.stem))
-	l.values = make(map[int][]byte, len(n.values))
+	l.values = make(map[byte][]byte, len(n.values))
 
 	l.depth = n.depth
 	copy(l.stem, n.stem)
@@ -1312,7 +1312,10 @@ func (n *LeafNode) Key(i int) []byte {
 }
 
 func (n *LeafNode) Value(i int) []byte {
-	return n.values[i]
+	if i >= NodeWidth {
+		panic("leaf node index out of range")
+	}
+	return n.values[byte(i)]
 }
 
 func (n *LeafNode) toDot(parent, path string) string {
@@ -1485,7 +1488,7 @@ func (n *LeafNode) serializeWithCompressedCommitments(c1Bytes [32]byte, c2Bytes 
 	var bitlist [bitlistSize]byte
 	for i, v := range n.values {
 		if v != nil {
-			setBit(bitlist[:], i)
+			setBit(bitlist[:], int(i))
 			children = append(children, v...)
 			if padding := emptyValue[:LeafValueSize-len(v)]; len(padding) != 0 {
 				children = append(children, padding...)
