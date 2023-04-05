@@ -206,7 +206,9 @@ func New() VerkleNode {
 func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 	vals := make(map[byte][]byte, len(values))
 	for i, v := range values {
-		vals[byte(i)] = v
+		if v != nil {
+			vals[byte(i)] = v
+		}
 	}
 
 	leaf := &LeafNode{
@@ -222,14 +224,14 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 	// marker and the stem.
 	cfg := GetConfig()
 	count := 0
-	var poly, c1poly, c2poly [256]Fr
+	var poly, c1poly, c2poly [NodeWidth]Fr
 	poly[0].SetUint64(1)
 	StemFromBytes(&poly[1], leaf.stem)
 
 	count = fillSuffixTreePoly(c1poly[:], values[:128])
-	leaf.c1 = cfg.CommitToPoly(c1poly[:], 256-count)
+	leaf.c1 = cfg.CommitToPoly(c1poly[:], NodeWidth-count)
 	count = fillSuffixTreePoly(c2poly[:], values[128:])
-	leaf.c2 = cfg.CommitToPoly(c2poly[:], 256-count)
+	leaf.c2 = cfg.CommitToPoly(c2poly[:], NodeWidth-count)
 	toFrMultiple([]*Fr{&poly[2], &poly[3]}, []*Point{leaf.c1, leaf.c2})
 
 	leaf.commitment = cfg.CommitToPoly(poly[:], 252)
@@ -243,7 +245,9 @@ func NewLeafNode(stem []byte, values [][]byte) *LeafNode {
 func NewLeafNodeWithNoComms(stem []byte, values [][]byte) *LeafNode {
 	vals := make(map[byte][]byte, len(values))
 	for i, v := range values {
-		vals[byte(i)] = v
+		if v != nil {
+			vals[byte(i)] = v
+		}
 	}
 	return &LeafNode{
 		// depth will be 0, but the commitment calculation
@@ -882,7 +886,7 @@ func (n *InternalNode) setDepth(d byte) {
 func MergeTrees(subroots []*InternalNode) VerkleNode {
 	root := New().(*InternalNode)
 	for _, subroot := range subroots {
-		for i := 0; i < 256; i++ {
+		for i := 0; i < NodeWidth; i++ {
 			if _, ok := subroot.children[i].(Empty); ok {
 				continue
 			}
@@ -936,7 +940,7 @@ func (n *LeafNode) updateCn(index byte, value []byte, c *Point) {
 	var (
 		old, newH [2]Fr
 		diff      Point
-		poly      [256]Fr
+		poly      [NodeWidth]Fr
 	)
 
 	// Optimization idea:
@@ -1127,8 +1131,8 @@ func leafToComms(poly []Fr, val []byte) {
 
 func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte) {
 	var (
-		poly [256]Fr // top-level polynomial
-		pe           = &ProofElements{
+		poly [NodeWidth]Fr // top-level polynomial
+		pe                 = &ProofElements{
 			Cis:    []*Point{n.commitment, n.commitment},
 			Zis:    []byte{0, 1},
 			Yis:    []*Fr{&poly[0], &poly[1]}, // Should be 0
@@ -1198,17 +1202,17 @@ func (n *LeafNode) GetProofItems(keys keylist) (*ProofElements, []byte, [][]byte
 
 		var (
 			suffix   = key[31]
-			suffPoly [256]Fr // suffix-level polynomial
+			suffPoly [NodeWidth]Fr // suffix-level polynomial
 			count    int
 		)
-		valsslice := make([][]byte, 256)
+		vals := make([][]byte, NodeWidth)
 		for idx := range n.values {
-			valsslice[idx] = n.values[idx]
+			vals[idx] = n.values[idx]
 		}
 		if suffix >= 128 {
-			count = fillSuffixTreePoly(suffPoly[:], valsslice[128:])
+			count = fillSuffixTreePoly(suffPoly[:], vals[128:])
 		} else {
-			count = fillSuffixTreePoly(suffPoly[:], valsslice[:128])
+			count = fillSuffixTreePoly(suffPoly[:], vals[:128])
 		}
 
 		// Proof of absence: case of a missing suffix tree.
@@ -1335,11 +1339,11 @@ func (n *LeafNode) setDepth(d byte) {
 }
 
 func (n *LeafNode) Values() [][]byte {
-	valsslice := make([][]byte, 256)
+	vals := make([][]byte, NodeWidth)
 	for idx := range n.values {
-		valsslice[idx] = n.values[idx]
+		vals[idx] = n.values[idx]
 	}
-	return valsslice
+	return vals
 }
 
 func setBit(bitlist []byte, index int) {
